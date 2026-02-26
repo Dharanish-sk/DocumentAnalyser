@@ -1,0 +1,8 @@
+2026-02-19 14:06:52.003 | INFO     | fraud_model.pipeline:__init__:69 - No pretrained model provided. Using ELA heuristics + metadata analysis.
+2026-02-19 14:06:52.003 | INFO     | app:lifespan:55 - Fraud detection pipeline initialized
+2026-02-19 14:12:38.031 | INFO     | fraud_model.pipeline:analyze:130 - Analyzing: C:\Users\Dharanish.DESKTOP-PKHQEEN\Documents\VScode programs\New folder (2)\document_fraud_ai\uploads\9477e447b678.jpg
+2026-02-19 14:12:38.670 | INFO     | fraud_model.pipeline:analyze:237 - Result: fraud_prob=0.2247, is_fraud=False, confidence=81.7%
+2026-02-19 14:27:39.774 | INFO     | fraud_model.pipeline:analyze:130 - Analyzing: C:\Users\Dharanish.DESKTOP-PKHQEEN\Documents\VScode programs\New folder (2)\document_fraud_ai\uploads\80e46f8ebdef.jpg
+2026-02-19 14:27:39.810 | INFO     | fraud_model.pipeline:analyze:237 - Result: fraud_prob=0.2108, is_fraud=False, confidence=81.48%
+2026-02-19 14:50:18.902 | INFO     | fraud_model.pipeline:analyze:130 - Analyzing: C:\Users\Dharanish.DESKTOP-PKHQEEN\Documents\VScode programs\New folder (2)\document_fraud_ai\uploads\719515c0b848.png
+2026-02-19 14:50:19.478 | INFO     | fraud_model.pipeline:analyze:237 - Result: fraud_prob=0.1923, is_fraud=False, confidence=80.57%

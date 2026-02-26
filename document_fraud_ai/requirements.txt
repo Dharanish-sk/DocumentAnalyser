@@ -1,0 +1,33 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# ML / Deep Learning
+torch>=2.1.0
+torchvision>=0.16.0
+Pillow>=10.0.0
+scikit-learn>=1.3.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# OCR
+pytesseract>=0.3.10
+
+# PDF Processing
+PyMuPDF>=1.24.0
+pikepdf>=8.0.0
+
+# Image Analysis
+opencv-python-headless>=4.8.0
+
+# Streamlit Frontend
+streamlit>=1.38.0
+requests>=2.31.0
+
+# Logging & Utils
+loguru>=0.7.0
+python-dotenv>=1.0.0
+
+# Docker health check
+httpx>=0.27.0
