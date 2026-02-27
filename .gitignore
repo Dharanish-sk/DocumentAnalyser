@@ -1,0 +1,26 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Uploads and logs (runtime generated)
+document_fraud_ai/uploads/
+document_fraud_ai/logs/
+
+# Model weights (large binary files)
+*.pth
+*.pt
+*.onnx
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
