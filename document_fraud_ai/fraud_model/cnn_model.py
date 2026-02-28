@@ -59,7 +59,7 @@ class FraudCNN(nn.Module):
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(128 * 16 * 16, 256),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, 1),
             nn.Sigmoid(),

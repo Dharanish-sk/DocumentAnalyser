@@ -25,6 +25,7 @@ Usage — tiny custom dataset (5+5 documents, use after prepare_custom_dataset.p
 
 import argparse
 import io
+import math
 import os
 import random
 
@@ -229,9 +230,19 @@ class ELADataset(Dataset):
             return torch.tensor(arr), torch.tensor(float(label), dtype=torch.float32)
 
 
+LABEL_SMOOTHING = 0.1
+
+
+def smooth_labels(labels: torch.Tensor, smoothing: float = LABEL_SMOOTHING) -> torch.Tensor:
+    """Apply label smoothing: pushes 0→0.05, 1→0.95 (with smoothing=0.1)."""
+    return labels * (1 - smoothing) + 0.5 * smoothing
+
+
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Training on: {device}")
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     # Load datasets
     train_set = ELADataset(args.data_dir, split="train")
@@ -259,8 +270,11 @@ def train(args):
     classifier_params = [p for p in model.backbone.classifier.parameters()]
     optimizer = torch.optim.AdamW(classifier_params, lr=args.lr * 10, weight_decay=1e-4)
 
-    # Cosine annealing over total epochs
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # Cosine annealing for phase 1 (classifier only)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.freeze_epochs, 1))
+
+    # Mixed precision scaler — no-op on CPU (enabled=False)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
 
     best_val_auc = 0.0
     patience_counter = 0
@@ -273,9 +287,17 @@ def train(args):
             logger.info(f"Epoch {epoch+1}: Unfreezing backbone for full fine-tuning")
             model.unfreeze_backbone()
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.epochs - args.freeze_epochs
-            )
+            # Warmup (3 epochs linear) + cosine decay for phase 2 (full fine-tuning)
+            warmup_epochs = 3
+            phase2_total = max(args.epochs - args.freeze_epochs, warmup_epochs + 1)
+
+            def _lr_lambda(ep, warmup=warmup_epochs, total=phase2_total):
+                if ep < warmup:
+                    return (ep + 1) / warmup
+                progress = (ep - warmup) / max(total - warmup, 1)
+                return 0.5 * (1 + math.cos(math.pi * progress))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
 
         # --- Training ---
         model.train()
@@ -283,25 +305,32 @@ def train(args):
         train_correct = 0
         train_total = 0
 
-        for images, labels in train_loader:
+        optimizer.zero_grad()
+        for step, (images, labels) in enumerate(train_loader):
             images, labels = images.to(device), labels.to(device)
 
-            optimizer.zero_grad()
-            outputs = model(images).squeeze(1)
+            with torch.autocast(device_type=device, dtype=torch.float16, enabled=(device == "cuda")):
+                outputs = model(images).squeeze(1)
+                # Label-smoothed class-weighted BCE loss
+                smooth_lbl = smooth_labels(labels)
+                bce_per_sample = nn.functional.binary_cross_entropy(
+                    outputs, smooth_lbl, reduction="none"
+                )
+                weight_tensor = torch.where(labels == 1, pos_weight_tensor, torch.ones_like(labels))
+                loss = (bce_per_sample * weight_tensor).mean() / args.accum_steps
 
-            # Class-weighted BCE loss
-            bce_per_sample = nn.functional.binary_cross_entropy(
-                outputs, labels, reduction="none"
-            )
-            weight_tensor = torch.where(labels == 1, pos_weight_tensor, torch.ones_like(labels))
-            loss = (bce_per_sample * weight_tensor).mean()
+            scaler.scale(loss).backward()
 
-            loss.backward()
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            is_last_step = (step + 1 == len(train_loader))
+            if (step + 1) % args.accum_steps == 0 or is_last_step:
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            train_loss += loss.item() * images.size(0)
-            predicted = (outputs > 0.5).float()
+            train_loss += loss.item() * args.accum_steps * images.size(0)
+            predicted = (outputs.detach() > 0.5).float()
             train_correct += (predicted == labels).sum().item()
             train_total += labels.size(0)
 
@@ -320,13 +349,15 @@ def train(args):
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
-                outputs = model(images).squeeze(1)
 
-                bce_per_sample = nn.functional.binary_cross_entropy(
-                    outputs, labels, reduction="none"
-                )
-                weight_tensor = torch.where(labels == 1, pos_weight_tensor, torch.ones_like(labels))
-                loss = (bce_per_sample * weight_tensor).mean()
+                with torch.autocast(device_type=device, dtype=torch.float16, enabled=(device == "cuda")):
+                    outputs = model(images).squeeze(1)
+                    # Validation uses true labels (no smoothing)
+                    bce_per_sample = nn.functional.binary_cross_entropy(
+                        outputs, labels, reduction="none"
+                    )
+                    weight_tensor = torch.where(labels == 1, pos_weight_tensor, torch.ones_like(labels))
+                    loss = (bce_per_sample * weight_tensor).mean()
 
                 val_loss += loss.item() * images.size(0)
                 predicted = (outputs > 0.5).float()
@@ -374,5 +405,6 @@ if __name__ == "__main__":
     parser.add_argument("--freeze_epochs", type=int, default=5, help="Epochs to freeze backbone")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (epochs)")
     parser.add_argument("--output_dir", type=str, default="./fraud_model", help="Model output directory")
+    parser.add_argument("--accum_steps", type=int, default=2, help="Gradient accumulation steps (effective batch = batch_size * accum_steps)")
     args = parser.parse_args()
     train(args)

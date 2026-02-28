@@ -68,6 +68,13 @@ class FraudDetectionPipeline:
                 self.model = load_model(model_path, model_type="efficientnet_b3", device=self.device)
                 self.model_loaded = True
                 logger.info(f"EfficientNet-B3 model loaded from {model_path} on {self.device}")
+                # JIT-compile for faster inference (PyTorch 2.x; graceful no-op on 1.x)
+                if hasattr(torch, "compile"):
+                    try:
+                        self.model = torch.compile(self.model, mode="reduce-overhead")
+                        logger.info("Model compiled with torch.compile(mode='reduce-overhead')")
+                    except Exception as e:
+                        logger.warning(f"torch.compile failed (continuing without): {e}")
             except Exception as e:
                 logger.warning(f"Failed to load model: {e}. Using heuristics only.")
         else:
@@ -122,9 +129,10 @@ class FraudDetectionPipeline:
             tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).to(self.device)
 
             with torch.no_grad():
-                prediction = self.model(tensor)
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(self.device == "cuda")):
+                    prediction = self.model(tensor)
 
-            return float(prediction.squeeze().cpu().item())
+            return float(prediction.squeeze().cpu().float().item())
         except Exception as e:
             logger.error(f"CNN inference failed: {e}")
             return None
@@ -204,20 +212,28 @@ class FraudDetectionPipeline:
         reasons = []
         scores = {}
 
-        # ---- Module 1: ELA Statistical Analysis ----
+        # ---- Module 1: ELA Statistical Analysis (multi-quality ensemble) ----
         image = self._get_image(file_path)
         if image:
-            ela_image = compute_ela(image)
+            # Ensemble ELA at 3 quality levels for a more robust tampering signal
+            ela_scores_ensemble = []
+            for q in [85, 90, 95]:
+                ela_q = compute_ela(image, quality=q)
+                stats_q = compute_ela_statistics(ela_q)
+                ela_scores_ensemble.append(stats_q["ela_score"])
+            ensemble_ela_score = float(np.mean(ela_scores_ensemble))
+
+            # Use quality=90 ELA image for CNN input and anomaly reporting
+            ela_image = compute_ela(image, quality=90)
             ela_stats = compute_ela_statistics(ela_image)
 
-            # Use pre-computed ela_score (not arbitrary ratio * 10 scaling)
-            scores["ela_statistical"] = ela_stats["ela_score"]
+            scores["ela_statistical"] = ensemble_ela_score
 
             if ela_stats["has_anomaly"]:
                 reasons.append(
                     f"ELA: Suspicious compression artifacts detected "
                     f"(cluster_ratio: {ela_stats['suspicious_region_ratio']:.4f}, "
-                    f"ela_score: {ela_stats['ela_score']:.4f})"
+                    f"ela_score: {ensemble_ela_score:.4f})"
                 )
 
             # ---- Module 2: CNN Prediction ----
