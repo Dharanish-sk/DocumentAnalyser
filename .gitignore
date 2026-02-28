@@ -24,3 +24,6 @@ document_fraud_ai/logs/
 # OS files
 .DS_Store
 Thumbs.db
+.claude 
+
+nul
