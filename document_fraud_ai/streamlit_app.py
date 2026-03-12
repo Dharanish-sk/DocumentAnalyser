@@ -96,7 +96,10 @@ if uploaded_file is not None:
                         module_scores = details.get("module_scores", {})
                         for module, score in module_scores.items():
                             label = module.replace("_", " ").title()
-                            st.progress(min(score, 1.0), text=f"{label}: {score:.4f}")
+                            if score is None:
+                                st.text(f"{label}: N/A (module unavailable)")
+                            else:
+                                st.progress(min(score, 1.0), text=f"{label}: {score:.4f}")
 
                         # Raw JSON
                         with st.expander("View Raw JSON Response"):
@@ -118,9 +121,11 @@ st.markdown(
     """
     **How it works:**
     1. **ELA Analysis** - Detects compression inconsistencies from image tampering
-    2. **CNN Model** - Deep learning classification of tampered vs genuine
-    3. **Metadata Check** - Analyzes file metadata for editing tool traces
-    4. **OCR Analysis** - Extracts text and checks for content anomalies
-    5. **Copy-Move Detection** - Finds duplicated regions within the document
+    2. **CNN Model** - EfficientNet-B3 deep learning classification (tampered vs genuine)
+    3. **ManTraNet** - Pixel-level forgery detection pre-trained on 385 manipulation types
+    4. **Metadata Check** - Analyzes file metadata for editing tool traces
+    5. **OCR Analysis** - Extracts text and checks for content anomalies
+    6. **Copy-Move Detection** - Finds duplicated regions within the document
+    7. **Blur/Sharpness** - Detects local sharpness inconsistencies from splicing
     """
 )

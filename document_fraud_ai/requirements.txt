@@ -29,5 +29,8 @@ requests>=2.31.0
 loguru>=0.7.0
 python-dotenv>=1.0.0
 
+# ManTraNet weight download
+gdown>=5.1.0
+
 # Docker health check
 httpx>=0.27.0
