@@ -49,7 +49,7 @@ WEIGHTS = {
     "metadata":        0.10,   # Metadata consistency checks
     "text_anomaly":    0.08,   # OCR + text anomaly detection
     "copy_move":       0.08,   # AKAZE-based copy-move detection
-    "blur_sharpness":  0.04,   # Local sharpness inconsistency
+    "blur_sharpness":  0.01,   # Local sharpness inconsistency
 }
 
 
