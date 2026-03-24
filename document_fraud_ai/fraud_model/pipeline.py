@@ -16,7 +16,6 @@ Orchestrates all analysis modules into a single prediction pipeline:
 4. OCR + Text Analysis (content anomalies)
 5. Copy-Move Detection (feature matching)
 6. Blur/Sharpness Inconsistency
-7. ManTraNet (pixel-level forgery detection — optional)
 
 Each module produces a risk score [0, 1] or None (if unavailable).
 The final fraud probability is a weighted combination using only active modules.
@@ -38,18 +37,16 @@ from utils.ela_analysis import (
 )
 from utils.metadata_analyzer import analyze_file_metadata
 from utils.ocr_extractor import extract_text, analyze_text_anomalies
-from utils.mantranet import load_mantranet, run_mantranet, is_available as mantranet_available
 
 
 # Weights for combining module scores into final fraud probability
 WEIGHTS = {
-    "ela_statistical": 0.20,   # ELA ensemble (3 quality levels)
-    "cnn_prediction":  0.25,   # EfficientNet-B3 V2 — best single-model accuracy
-    "mantranet":       0.25,   # ManTraNet — pixel-level forgery detection
-    "metadata":        0.10,   # Metadata consistency checks
-    "text_anomaly":    0.08,   # OCR + text anomaly detection
-    "copy_move":       0.08,   # AKAZE-based copy-move detection
-    "blur_sharpness":  0.00,   # Local sharpness inconsistency
+    "ela_statistical": 0.25,   # ELA ensemble (3 quality levels)
+    "cnn_prediction":  0.35,   # EfficientNet-B3 V2 — best single-model accuracy
+    "metadata":        0.15,   # Metadata consistency checks
+    "text_anomaly":    0.10,   # OCR + text anomaly detection
+    "copy_move":       0.10,   # AKAZE-based copy-move detection
+    "blur_sharpness":  0.05,   # Local sharpness inconsistency
 }
 
 
@@ -80,20 +77,6 @@ class FraudDetectionPipeline:
 
         # Temperature for score calibration (can be tuned on a held-out set)
         self.temperature = 1.0
-
-        # ManTraNet
-        self.mantranet_model = None
-        if mantranet_available():
-            try:
-                self.mantranet_model = load_mantranet(device=self.device)
-                logger.info("ManTraNet loaded successfully")
-            except Exception as e:
-                logger.warning(f"ManTraNet load failed (skipping): {e}")
-        else:
-            logger.info(
-                "ManTraNet not set up — run utils.mantranet.setup_mantranet() to enable it. "
-                "Pipeline will run without ManTraNet."
-            )
 
         if model_path and os.path.exists(model_path):
             try:
@@ -328,25 +311,11 @@ class FraudDetectionPipeline:
                     f"({blur_result['inconsistent_cell_count']} inconsistent cells)"
                 )
 
-            # ---- Module 7: ManTraNet ----
-            if self.mantranet_model is not None:
-                mt_result = run_mantranet(self.mantranet_model, image, device=self.device)
-                scores["mantranet"] = mt_result["mantranet_score"]
-                if mt_result["mantranet_score"] is not None and mt_result["mantranet_score"] > 0.5:
-                    reasons.append(
-                        f"ManTraNet: Pixel-level tampering detected "
-                        f"(score: {mt_result['mantranet_score']:.4f}, "
-                        f"suspicious_region: {mt_result['suspicious_region_ratio']:.2%})"
-                    )
-            else:
-                scores["mantranet"] = None
-
         else:
             scores["ela_statistical"] = None
             scores["cnn_prediction"] = None
             scores["copy_move"] = None
             scores["blur_sharpness"] = None
-            scores["mantranet"] = None
             reasons.append("Could not render document for image analysis")
 
         # ---- Module 3: Metadata Analysis ----
@@ -381,7 +350,6 @@ class FraudDetectionPipeline:
                 },
                 "model_used": (
                     (self.model_type if self.model_loaded else "Heuristic")
-                    + (" + ManTraNet" if self.mantranet_model is not None else "")
                     + (" + TTA" if self.enable_tta and self.model_loaded else "")
                     + (" + MultiQ-CNN" if self.enable_multi_quality_cnn and self.model_loaded else "")
                 ),

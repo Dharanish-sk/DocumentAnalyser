@@ -7,6 +7,7 @@ inconsistencies that may indicate tampering:
 - Software tool anomalies
 - Producer/creator inconsistencies
 - Suspicious metadata patterns
+- Embedded keyword detection (UserComment / ImageDescription)
 """
 
 import os
@@ -15,6 +16,16 @@ from datetime import datetime
 from typing import Optional
 from PIL import Image
 from PIL.ExifTags import TAGS
+
+try:
+    import piexif
+    PIEXIF_AVAILABLE = True
+except ImportError:
+    PIEXIF_AVAILABLE = False
+
+
+# Keywords that, if found in UserComment or ImageDescription, flag the image as fake.
+FAKE_KEYWORDS = ["fake", "forged", "tampered", "manipulated", "edited", "fabricated"]
 
 
 def _parse_pdf_date(date_str: str) -> Optional[datetime]:
@@ -36,6 +47,98 @@ def _parse_pdf_date(date_str: str) -> Optional[datetime]:
     return None
 
 
+def _safe_decode(val) -> str:
+    """Decode bytes to lowercase string, ignoring errors."""
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="ignore").lower()
+    return str(val).lower()
+
+
+def _check_embedded_keywords(image_path: str) -> dict:
+    """
+    Check UserComment and ImageDescription EXIF fields for fake-indicator keywords
+    using piexif for robust low-level EXIF parsing.
+
+    Args:
+        image_path: Path to the image file.
+
+    Returns:
+        {
+            "verdict":      "FAKE" | "TRUE" | "NO_EXIF" | "UNAVAILABLE",
+            "detail":       human-readable string,
+            "risk_score":   float [0.0 – 1.0],
+            "anomaly":      str | None   (ready to append to reasons list),
+        }
+    """
+    if not PIEXIF_AVAILABLE:
+        return {
+            "verdict": "UNAVAILABLE",
+            "detail": "piexif not installed — keyword check skipped",
+            "risk_score": 0.0,
+            "anomaly": None,
+        }
+
+    try:
+        img = Image.open(image_path)
+        exif_bytes = img.info.get("exif")
+    except Exception:
+        return {
+            "verdict": "NO_EXIF",
+            "detail": "Could not open image for keyword check",
+            "risk_score": 0.0,
+            "anomaly": None,
+        }
+
+    if not exif_bytes:
+        return {
+            "verdict": "NO_EXIF",
+            "detail": "No EXIF metadata found",
+            "risk_score": 0.0,
+            "anomaly": None,
+        }
+
+    try:
+        exif_dict = piexif.load(exif_bytes)
+    except Exception:
+        return {
+            "verdict": "NO_EXIF",
+            "detail": "EXIF present but could not be parsed by piexif",
+            "risk_score": 0.0,
+            "anomaly": None,
+        }
+
+    user_comment = exif_dict.get("Exif", {}).get(piexif.ExifIFD.UserComment, b"")
+    image_desc   = exif_dict.get("0th",  {}).get(piexif.ImageIFD.ImageDescription, b"")
+
+    comment_str = _safe_decode(user_comment).strip()
+    desc_str    = _safe_decode(image_desc).strip()
+    detail      = f"UserComment='{comment_str}' | ImageDescription='{desc_str}'"
+
+    matched_keyword = None
+    for kw in FAKE_KEYWORDS:
+        if kw in comment_str or kw in desc_str:
+            matched_keyword = kw
+            break
+
+    if matched_keyword:
+        return {
+            "verdict": "FAKE",
+            "detail": detail,
+            "risk_score": 0.9,
+            "anomaly": (
+                f"Fake-indicator keyword '{matched_keyword}' found in embedded EXIF fields "
+                f"({detail})"
+            ),
+        }
+
+    return {
+        "verdict": "TRUE",
+        "detail": detail,
+        "risk_score": 0.0,
+        "anomaly": None,
+    }
+
+
 def analyze_image_metadata(image_path: str) -> dict:
     """
     Extract and analyze EXIF metadata from an image file.
@@ -51,6 +154,8 @@ def analyze_image_metadata(image_path: str) -> dict:
         "anomalies": [],
         "raw_metadata": {},
         "risk_score": 0.0,
+        "keyword_verdict": None,   # "FAKE" | "TRUE" | "NO_EXIF" | "UNAVAILABLE"
+        "keyword_detail": None,
     }
 
     try:
@@ -61,9 +166,18 @@ def analyze_image_metadata(image_path: str) -> dict:
         result["risk_score"] = 0.3
         return result
 
+    # ---- Embedded keyword check (UserComment / ImageDescription) ----
+    kw_result = _check_embedded_keywords(image_path)
+    result["keyword_verdict"] = kw_result["verdict"]
+    result["keyword_detail"]  = kw_result["detail"]
+    result["risk_score"]     += kw_result["risk_score"]
+    if kw_result["anomaly"]:
+        result["anomalies"].append(kw_result["anomaly"])
+
     if not exif_data:
         # Missing EXIF is normal for scanned docs, screenshots, and most PDFs.
-        # Do NOT flag as suspicious — risk_score stays 0.0.
+        # Do NOT flag as suspicious — risk_score contribution only from keyword check above.
+        result["risk_score"] = min(result["risk_score"], 1.0)
         return result
 
     result["metadata_found"] = True
@@ -77,7 +191,7 @@ def analyze_image_metadata(image_path: str) -> dict:
 
     result["raw_metadata"] = decoded
 
-    # Check for software editing tools
+    # ---- Software editing tool check ----
     # Removed: canva, fotor, pixlr (legitimate design tools)
     software = decoded.get("Software", "")
     suspicious_tools = ["photoshop", "gimp", "paint.net"]
@@ -87,7 +201,7 @@ def analyze_image_metadata(image_path: str) -> dict:
             result["risk_score"] += 0.3
             break
 
-    # Check date consistency
+    # ---- Date consistency check ----
     date_original = decoded.get("DateTimeOriginal", "")
     date_digitized = decoded.get("DateTimeDigitized", "")
     date_modified = decoded.get("DateTime", "")
@@ -106,16 +220,18 @@ def analyze_image_metadata(image_path: str) -> dict:
             )
             result["risk_score"] += 0.10
 
-    # Missing camera fields: only flag as suspicious if SOME camera metadata exists
-    # (indicates selective stripping). If NO camera EXIF at all, that's normal.
+    # ---- Partial / stripped camera EXIF check ----
+    # Only flag if SOME camera metadata exists (indicates selective stripping).
+    # If NO camera EXIF at all, that's normal.
     camera_fields = ["Make", "Model"]
     has_any_camera_exif = any(f in decoded for f in camera_fields)
     expected_fields = ["Make", "Model", "DateTimeOriginal"]
     missing = [f for f in expected_fields if f not in decoded]
 
     if has_any_camera_exif and len(missing) >= 2:
-        # Inconsistency: partial camera EXIF suggests selective metadata stripping
-        result["anomalies"].append(f"Inconsistent EXIF: partial camera metadata, missing {', '.join(missing)}")
+        result["anomalies"].append(
+            f"Inconsistent EXIF: partial camera metadata, missing {', '.join(missing)}"
+        )
         result["risk_score"] += 0.15
 
     result["risk_score"] = min(result["risk_score"], 1.0)
@@ -183,7 +299,7 @@ def analyze_pdf_metadata(pdf_path: str) -> dict:
                 result["risk_score"] += 0.15
                 break
 
-    # Date mismatch with tiered scoring
+    # ---- Date mismatch with tiered scoring ----
     creation_date_str = metadata.get("creationDate", "") if metadata else ""
     mod_date_str = metadata.get("modDate", "") if metadata else ""
 
@@ -205,7 +321,7 @@ def analyze_pdf_metadata(pdf_path: str) -> dict:
                 result["risk_score"] += 0.10
             # delta_days <= 30: routine saves, not flagged
 
-    # Large file size per page
+    # ---- Large file size per page ----
     try:
         file_size = os.path.getsize(pdf_path)
         if result["page_count"] > 0:
@@ -218,7 +334,7 @@ def analyze_pdf_metadata(pdf_path: str) -> dict:
     except Exception:
         pass
 
-    # JavaScript detection (malicious PDF indicator)
+    # ---- JavaScript detection (malicious PDF indicator) ----
     for page_num in range(len(doc)):
         page = doc[page_num]
         text = page.get_text()
